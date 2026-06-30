@@ -1,0 +1,13 @@
+[package]
+name = "block-duplicator"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "bd"
+path = "src/main.rs"
+
+[dependencies]
+is_elevated = "0.1.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
