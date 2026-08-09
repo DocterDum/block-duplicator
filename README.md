@@ -48,6 +48,7 @@ bd --src <path> --dst <path>
    [--dst-kind file|block|vhdx|network]
    [--chunk-size <bytes>]
    [--vhdx-size-bytes <bytes>]
+   [--require-elevation]
    [--help|-h]
 ```
 
@@ -71,6 +72,7 @@ If `--src-kind` / `--dst-kind` are omitted, the kind is inferred from the path:
 | `--dst-kind` | Force the destination backend | inferred |
 | `--chunk-size` | Transfer buffer size in bytes (clamped up to backend block size) | `1048576` (1 MiB) |
 | `--vhdx-size-bytes` | Size of the VHDX to create; falls back to source length when measurable | source length |
+| `--require-elevation` | Force the elevated-worker path even if no backend needs it (Windows) | off |
 | `--help`, `-h` | Print usage and exit | — |
 
 ### Examples

@@ -43,6 +43,8 @@ impl BlockSink for FileSink {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+        self.file.flush()?;
+        // Force data to stable storage before the copy is reported as complete.
+        self.file.sync_all()
     }
 }

@@ -77,12 +77,16 @@ fn main() {
                 std::process::exit(1);
             }
         };
+        // The elevated worker starts with a different working directory (usually
+        // System32), so relative file/VHDX paths must be resolved before handoff.
+        let src_path = absolutize_for_worker(&args.src, resolved_src_kind);
+        let dst_path = absolutize_for_worker(&args.dst, resolved_dst_kind);
         let (mut source, mut sink) = match elevated_worker::start_elevated_worker_session(
             &exe,
             elevated_worker::backend_kind_to_wire(resolved_src_kind),
-            &args.src,
+            &src_path,
             elevated_worker::backend_kind_to_wire(resolved_dst_kind),
-            &args.dst,
+            &dst_path,
             args.chunk_size,
             args.vhdx_size_bytes,
         ) {
@@ -322,8 +326,16 @@ where
         }
     }
 
-    let src = src.ok_or_else(|| "Missing required --src <path>".to_string())?;
-    let dst = dst.ok_or_else(|| "Missing required --dst <path>".to_string())?;
+    // Worker mode is relaunched as `--bd-worker --bd-port N --bd-token T` and
+    // receives src/dst over the IPC channel, so they must not be required here.
+    let (src, dst) = if worker_mode {
+        (src.unwrap_or_default(), dst.unwrap_or_default())
+    } else {
+        (
+            src.ok_or_else(|| "Missing required --src <path>".to_string())?,
+            dst.ok_or_else(|| "Missing required --dst <path>".to_string())?,
+        )
+    };
 
     Ok(CliArgs {
         src,
@@ -340,7 +352,7 @@ where
 }
 
 fn usage() -> &'static str {
-    "Usage: block-duplicator --src <path> --dst <path> [--src-kind file|block|network] [--dst-kind file|block|vhdx|network] [--chunk-size <bytes>] [--vhdx-size-bytes <bytes>]\nIf kind is omitted, prefix \\\\.\\ implies block; tcp:// implies network; .vhdx implies vhdx; otherwise file."
+    "Usage: block-duplicator --src <path> --dst <path> [--src-kind file|block|network] [--dst-kind file|block|vhdx|network] [--chunk-size <bytes>] [--vhdx-size-bytes <bytes>] [--require-elevation]\nIf kind is omitted, prefix \\\\.\\ implies block; tcp:// implies network; .vhdx implies vhdx; otherwise file."
 }
 
 fn print_usage() {
@@ -387,6 +399,16 @@ fn parse_backend_kind(raw: &str) -> Result<BackendKind, String> {
         _ => Err(format!(
             "Invalid backend kind '{raw}'. Expected: file|block|vhdx|network"
         )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn absolutize_for_worker(path: &str, kind: BackendKind) -> String {
+    match kind {
+        BackendKind::File | BackendKind::Vhdx => std::path::absolute(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string()),
+        BackendKind::Block | BackendKind::Network => path.to_string(),
     }
 }
 

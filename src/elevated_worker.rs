@@ -4,6 +4,8 @@ use crate::backends::block_sink::BlockDeviceSink;
 use crate::backends::block_source::BlockDeviceSource;
 use crate::backends::file_sink::FileSink;
 use crate::backends::file_source::FileSource;
+use crate::backends::network_sink::NetworkSink;
+use crate::backends::network_source::NetworkSource;
 use crate::backends::vhdx_sink::VhdxSink;
 use crate::core::io::{BlockSink, BlockSource};
 use std::cell::RefCell;
@@ -20,10 +22,12 @@ const OP_READ_AT: u8 = 3;
 const OP_WRITE_AT: u8 = 4;
 const OP_FLUSH: u8 = 5;
 const OP_SHUTDOWN: u8 = 6;
+const OP_SINK_LEN: u8 = 7;
 
 const KIND_FILE: u8 = 1;
 const KIND_BLOCK: u8 = 2;
 const KIND_VHDX: u8 = 3;
+const KIND_NETWORK: u8 = 4;
 
 pub fn start_elevated_worker_session(
     exe: &std::path::Path,
@@ -88,6 +92,8 @@ pub fn run_worker(port: u16, token: u64) -> io::Result<()> {
             Err(_) => break,
         };
 
+        // Backend failures are reported to the parent as status 1 + message so
+        // the user sees the real OS error instead of a dropped connection.
         match op {
             OP_INIT => {
                 let src_kind = read_u8(&mut stream)?;
@@ -97,46 +103,72 @@ pub fn run_worker(port: u16, token: u64) -> io::Result<()> {
                 let src_path = read_string(&mut stream)?;
                 let dst_path = read_string(&mut stream)?;
 
-                source = Some(open_source(src_kind, &src_path, chunk_size)?);
-                sink = Some(open_sink(
-                    dst_kind,
-                    &dst_path,
-                    chunk_size,
-                    if vhdx_size_bytes == 0 {
-                        None
-                    } else {
+                let result = open_source(src_kind, &src_path, chunk_size).and_then(|src| {
+                    // Mirror the non-elevated path: a VHDX sink with no explicit
+                    // size falls back to the measured source length.
+                    let vhdx_size = if vhdx_size_bytes != 0 {
                         Some(vhdx_size_bytes)
-                    },
-                )?);
-                write_ok(&mut stream)?;
+                    } else if dst_kind == KIND_VHDX {
+                        Some(src.len()?)
+                    } else {
+                        None
+                    };
+                    let dst = open_sink(dst_kind, &dst_path, chunk_size, vhdx_size)?;
+                    Ok((src, dst))
+                });
+                match result {
+                    Ok((src, dst)) => {
+                        source = Some(src);
+                        sink = Some(dst);
+                        write_ok(&mut stream)?;
+                    }
+                    Err(err) => write_err(&mut stream, &err)?,
+                }
             }
-            OP_SOURCE_LEN => {
-                let len = source_mut(&mut source)?.len()?;
-                write_ok(&mut stream)?;
-                write_u64(&mut stream, len)?;
-            }
+            OP_SOURCE_LEN => match source_mut(&mut source).and_then(|s| s.len()) {
+                Ok(len) => {
+                    write_ok(&mut stream)?;
+                    write_u64(&mut stream, len)?;
+                }
+                Err(err) => write_err(&mut stream, &err)?,
+            },
+            OP_SINK_LEN => match sink_mut(&mut sink).and_then(|s| s.len()) {
+                Ok(len) => {
+                    write_ok(&mut stream)?;
+                    write_u64(&mut stream, len)?;
+                }
+                Err(err) => write_err(&mut stream, &err)?,
+            },
             OP_READ_AT => {
                 let offset = read_u64(&mut stream)?;
                 let len = read_u32(&mut stream)? as usize;
                 let mut buf = vec![0u8; len];
-                let read = source_mut(&mut source)?.read_at(offset, &mut buf)?;
-                write_ok(&mut stream)?;
-                write_u32(&mut stream, read as u32)?;
-                stream.write_all(&buf[..read])?;
+                match source_mut(&mut source).and_then(|s| s.read_at(offset, &mut buf)) {
+                    Ok(read) => {
+                        write_ok(&mut stream)?;
+                        write_u32(&mut stream, read as u32)?;
+                        stream.write_all(&buf[..read])?;
+                    }
+                    Err(err) => write_err(&mut stream, &err)?,
+                }
             }
             OP_WRITE_AT => {
                 let offset = read_u64(&mut stream)?;
                 let len = read_u32(&mut stream)? as usize;
                 let mut buf = vec![0u8; len];
                 stream.read_exact(&mut buf)?;
-                let written = sink_mut(&mut sink)?.write_at(offset, &buf)?;
-                write_ok(&mut stream)?;
-                write_u32(&mut stream, written as u32)?;
+                match sink_mut(&mut sink).and_then(|s| s.write_at(offset, &buf)) {
+                    Ok(written) => {
+                        write_ok(&mut stream)?;
+                        write_u32(&mut stream, written as u32)?;
+                    }
+                    Err(err) => write_err(&mut stream, &err)?,
+                }
             }
-            OP_FLUSH => {
-                sink_mut(&mut sink)?.flush()?;
-                write_ok(&mut stream)?;
-            }
+            OP_FLUSH => match sink_mut(&mut sink).and_then(|s| s.flush()) {
+                Ok(()) => write_ok(&mut stream)?,
+                Err(err) => write_err(&mut stream, &err)?,
+            },
             OP_SHUTDOWN => {
                 write_ok(&mut stream)?;
                 break;
@@ -188,7 +220,10 @@ struct IpcSink {
 
 impl BlockSink for IpcSink {
     fn len(&self) -> io::Result<u64> {
-        Ok(0)
+        let mut s = self.stream.borrow_mut();
+        write_u8(&mut s, OP_SINK_LEN)?;
+        expect_ok(&mut s)?;
+        read_u64(&mut s)
     }
     fn block_size(&self) -> usize {
         self.block_size
@@ -227,30 +262,35 @@ impl Drop for IpcSink {
 enum SourceBackend {
     File(FileSource),
     Block(BlockDeviceSource),
+    Network(NetworkSource),
 }
 impl BlockSource for SourceBackend {
     fn len(&self) -> io::Result<u64> {
         match self {
             SourceBackend::File(v) => v.len(),
             SourceBackend::Block(v) => v.len(),
+            SourceBackend::Network(v) => v.len(),
         }
     }
     fn block_size(&self) -> usize {
         match self {
             SourceBackend::File(v) => v.block_size(),
             SourceBackend::Block(v) => v.block_size(),
+            SourceBackend::Network(v) => v.block_size(),
         }
     }
     fn capabilities(&self) -> crate::core::io::BackendCapabilities {
         match self {
             SourceBackend::File(v) => v.capabilities(),
             SourceBackend::Block(v) => v.capabilities(),
+            SourceBackend::Network(v) => v.capabilities(),
         }
     }
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             SourceBackend::File(v) => v.read_at(offset, buf),
             SourceBackend::Block(v) => v.read_at(offset, buf),
+            SourceBackend::Network(v) => v.read_at(offset, buf),
         }
     }
 }
@@ -259,6 +299,7 @@ enum SinkBackend {
     File(FileSink),
     Block(BlockDeviceSink),
     Vhdx(VhdxSink),
+    Network(NetworkSink),
 }
 impl BlockSink for SinkBackend {
     fn len(&self) -> io::Result<u64> {
@@ -266,6 +307,7 @@ impl BlockSink for SinkBackend {
             SinkBackend::File(v) => v.len(),
             SinkBackend::Block(v) => v.len(),
             SinkBackend::Vhdx(v) => v.len(),
+            SinkBackend::Network(v) => v.len(),
         }
     }
     fn block_size(&self) -> usize {
@@ -273,6 +315,7 @@ impl BlockSink for SinkBackend {
             SinkBackend::File(v) => v.block_size(),
             SinkBackend::Block(v) => v.block_size(),
             SinkBackend::Vhdx(v) => v.block_size(),
+            SinkBackend::Network(v) => v.block_size(),
         }
     }
     fn capabilities(&self) -> crate::core::io::BackendCapabilities {
@@ -280,6 +323,7 @@ impl BlockSink for SinkBackend {
             SinkBackend::File(v) => v.capabilities(),
             SinkBackend::Block(v) => v.capabilities(),
             SinkBackend::Vhdx(v) => v.capabilities(),
+            SinkBackend::Network(v) => v.capabilities(),
         }
     }
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<usize> {
@@ -287,6 +331,7 @@ impl BlockSink for SinkBackend {
             SinkBackend::File(v) => v.write_at(offset, buf),
             SinkBackend::Block(v) => v.write_at(offset, buf),
             SinkBackend::Vhdx(v) => v.write_at(offset, buf),
+            SinkBackend::Network(v) => v.write_at(offset, buf),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -294,6 +339,7 @@ impl BlockSink for SinkBackend {
             SinkBackend::File(v) => v.flush(),
             SinkBackend::Block(v) => v.flush(),
             SinkBackend::Vhdx(v) => v.flush(),
+            SinkBackend::Network(v) => v.flush(),
         }
     }
 }
@@ -302,6 +348,7 @@ fn open_source(kind: u8, path: &str, block: usize) -> io::Result<SourceBackend> 
     match kind {
         KIND_FILE => Ok(SourceBackend::File(FileSource::open(path, block)?)),
         KIND_BLOCK => Ok(SourceBackend::Block(BlockDeviceSource::open(path, block)?)),
+        KIND_NETWORK => Ok(SourceBackend::Network(NetworkSource::connect(path, block)?)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid source kind")),
     }
 }
@@ -315,6 +362,7 @@ fn open_sink(kind: u8, path: &str, block: usize, vhdx_size_bytes: Option<u64>) -
             })?;
             Ok(SinkBackend::Vhdx(VhdxSink::create(path, size, block)?))
         }
+        KIND_NETWORK => Ok(SinkBackend::Network(NetworkSink::connect(path, block)?)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid sink kind")),
     }
 }
@@ -333,7 +381,12 @@ fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> io::Result<
     let start = Instant::now();
     loop {
         match listener.accept() {
-            Ok((s, _)) => return Ok(s),
+            Ok((s, _)) => {
+                // The stream inherits the listener's non-blocking mode; all
+                // subsequent IPC reads/writes expect a blocking socket.
+                s.set_nonblocking(false)?;
+                return Ok(s);
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if start.elapsed() > timeout {
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "worker did not connect"));
@@ -390,6 +443,11 @@ fn write_ok(s: &mut TcpStream) -> io::Result<()> {
     write_u8(s, 0)
 }
 
+fn write_err(s: &mut TcpStream, err: &io::Error) -> io::Result<()> {
+    write_u8(s, 1)?;
+    write_string(s, &err.to_string())
+}
+
 fn write_u8(s: &mut TcpStream, v: u8) -> io::Result<()> {
     s.write_all(&[v])
 }
@@ -430,8 +488,6 @@ pub fn backend_kind_to_wire(kind: super::BackendKind) -> u8 {
         super::BackendKind::File => KIND_FILE,
         super::BackendKind::Block => KIND_BLOCK,
         super::BackendKind::Vhdx => KIND_VHDX,
-        super::BackendKind::Network => {
-            panic!("network backend is not supported in elevated worker mode")
-        }
+        super::BackendKind::Network => KIND_NETWORK,
     }
 }

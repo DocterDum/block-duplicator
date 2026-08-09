@@ -39,7 +39,18 @@ where
     let chunk_size = chunk_size.max(preferred_block);
 
     let source_len = source.len()?;
-    let _sink_len_before = sink.len()?;
+    // Opportunistic pre-flight: fixed-capacity sinks (block devices, attached
+    // VHDX disks) report a real length; growable or streaming sinks report 0
+    // and are skipped. Prevents partially overwriting a too-small disk.
+    let sink_len = sink.len()?;
+    if sink_len > 0 && sink_len < source_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "destination is smaller than source ({sink_len} < {source_len} bytes)"
+            ),
+        ));
+    }
     let mut copied = 0_u64;
     let mut buf = vec![0_u8; chunk_size];
 
@@ -48,7 +59,12 @@ where
         let to_read = remaining.min(buf.len());
         let read = source.read_at(copied, &mut buf[..to_read])?;
         if read == 0 {
-            break;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "source ended prematurely: got {copied} of {source_len} bytes"
+                ),
+            ));
         }
 
         let mut written_total = 0usize;

@@ -9,7 +9,8 @@ use std::process::Command;
 
 #[cfg(target_os = "windows")]
 pub struct VhdxSink {
-    inner: BlockDeviceSink,
+    // Option so Drop can release the device handle before dismounting the image.
+    inner: Option<BlockDeviceSink>,
     image_path: String,
 }
 
@@ -20,6 +21,15 @@ impl VhdxSink {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "vhdx size must be > 0",
+            ));
+        }
+        // diskpart's `file="..."` value has no escape for embedded quotes, so a
+        // path containing one could break out of the quoted value and inject
+        // arbitrary diskpart commands. Reject rather than attempt to escape it.
+        if image_path.contains('"') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "vhdx path must not contain a '\"' character",
             ));
         }
 
@@ -35,15 +45,25 @@ impl VhdxSink {
         let inner = BlockDeviceSink::open(&sink_path, block_size)?;
 
         Ok(Self {
-            inner,
+            inner: Some(inner),
             image_path: image_path.to_string(),
         })
+    }
+
+    fn inner(&self) -> &BlockDeviceSink {
+        self.inner.as_ref().expect("VhdxSink used after drop")
+    }
+
+    fn inner_mut(&mut self) -> &mut BlockDeviceSink {
+        self.inner.as_mut().expect("VhdxSink used after drop")
     }
 }
 
 #[cfg(target_os = "windows")]
 impl Drop for VhdxSink {
     fn drop(&mut self) {
+        // Close the \\.\PhysicalDrive handle first, or the dismount can fail.
+        drop(self.inner.take());
         let p = ps_single_quoted(&self.image_path);
         let _ = run_powershell(&format!(
             "Dismount-DiskImage -ImagePath '{p}' -ErrorAction SilentlyContinue"
@@ -54,11 +74,11 @@ impl Drop for VhdxSink {
 #[cfg(target_os = "windows")]
 impl BlockSink for VhdxSink {
     fn len(&self) -> io::Result<u64> {
-        self.inner.len()
+        self.inner().len()
     }
 
     fn block_size(&self) -> usize {
-        self.inner.block_size()
+        self.inner().block_size()
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -69,11 +89,11 @@ impl BlockSink for VhdxSink {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write_at(offset, buf)
+        self.inner_mut().write_at(offset, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        self.inner_mut().flush()
     }
 }
 

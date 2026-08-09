@@ -68,7 +68,9 @@ impl BlockSink for BlockDeviceSink {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+        self.file.flush()?;
+        // FlushFileBuffers: force written data through the OS cache to the device.
+        self.file.sync_all()
     }
 }
 
@@ -147,7 +149,9 @@ mod unix {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
-            self.file.flush()
+            self.file.flush()?;
+            // fsync: force written data through the OS cache to the device.
+            self.file.sync_all()
         }
     }
 }
