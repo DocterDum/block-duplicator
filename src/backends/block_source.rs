@@ -102,3 +102,81 @@ fn query_device_length(file: &File) -> io::Result<u64> {
     Ok(out.length as u64)
 }
 
+#[cfg(unix)]
+mod unix {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::io::AsRawFd;
+
+    use crate::core::io::{BackendCapabilities, BlockSource};
+
+    use super::blkgetsize64::device_size;
+
+    pub struct BlockDeviceSource {
+        file: File,
+        block_size: usize,
+    }
+
+    impl BlockDeviceSource {
+        pub fn open(device_path: &str, block_size: usize) -> std::io::Result<Self> {
+            let file = File::open(device_path)?;
+            Ok(Self { file, block_size })
+        }
+    }
+
+    impl BlockSource for BlockDeviceSource {
+        fn len(&self) -> std::io::Result<u64> {
+            device_size(self.file.as_raw_fd())
+        }
+
+        fn block_size(&self) -> usize {
+            self.block_size
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                random_access: true,
+                requires_elevation: true,
+            }
+        }
+
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.read(buf)
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix::BlockDeviceSource;
+
+// Raw block-device byte length via the Linux `BLKGETSIZE64` ioctl. Shared by the
+// source and sink backends. Encoded with the asm-generic `_IOC` layout, which
+// covers x86/x86_64/arm/aarch64; exotic arches (mips/ppc/alpha) use a different
+// layout and are out of scope for this port.
+#[cfg(unix)]
+pub(crate) mod blkgetsize64 {
+    const NRBITS: u64 = 8;
+    const TYPEBITS: u64 = 8;
+    const SIZEBITS: u64 = 14;
+    const NRSHIFT: u64 = 0;
+    const TYPESHIFT: u64 = NRSHIFT + NRBITS;
+    const SIZESHIFT: u64 = TYPESHIFT + TYPEBITS;
+    const DIRSHIFT: u64 = SIZESHIFT + SIZEBITS;
+    const READ: u64 = 2;
+
+    const BLKGETSIZE64: u64 = (READ << DIRSHIFT)
+        | (0x12 << TYPESHIFT)
+        | (114 << NRSHIFT)
+        | ((std::mem::size_of::<libc::size_t>() as u64) << SIZESHIFT);
+
+    pub fn device_size(fd: std::os::unix::io::RawFd) -> std::io::Result<u64> {
+        let mut size: u64 = 0;
+        let ret = unsafe { libc::ioctl(fd, BLKGETSIZE64 as libc::c_ulong, &mut size as *mut u64) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(size)
+    }
+}
+

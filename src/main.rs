@@ -14,9 +14,9 @@ use core::io::{BlockSink, BlockSource};
 use engine::transfer::copy_all_with_progress;
 use std::io::Write;
 use std::time::{Duration, Instant};
-#[cfg(target_os = "windows")]
+#[cfg(any(windows, unix))]
 use backends::block_sink::BlockDeviceSink;
-#[cfg(target_os = "windows")]
+#[cfg(any(windows, unix))]
 use backends::block_source::BlockDeviceSource;
 
 fn main() {
@@ -96,6 +96,17 @@ fn main() {
         return;
     }
 
+    #[cfg(unix)]
+    {
+        let requires_elevation = args.require_elevation
+            || matches!(resolved_src_kind, BackendKind::Block)
+            || matches!(resolved_dst_kind, BackendKind::Block);
+        if requires_elevation && unsafe { libc::geteuid() } != 0 {
+            eprintln!("Raw block-device access requires root privileges. Re-run with sudo.");
+            std::process::exit(1);
+        }
+    }
+
     let mut source: Box<dyn BlockSource> = match resolved_src_kind {
         BackendKind::File => {
             let source = match FileSource::open(&args.src, args.chunk_size) {
@@ -108,7 +119,7 @@ fn main() {
             Box::new(source) as Box<dyn BlockSource>
         }
         BackendKind::Block => {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(windows, unix))]
             {
                 let source = match BlockDeviceSource::open(&args.src, args.chunk_size) {
                     Ok(source) => source,
@@ -119,9 +130,9 @@ fn main() {
                 };
                 Box::new(source) as Box<dyn BlockSource>
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(windows, unix)))]
             {
-                eprintln!("Block source backend is only supported on Windows.");
+                eprintln!("Block source backend is not supported on this platform.");
                 std::process::exit(1);
             }
         }
@@ -151,7 +162,7 @@ fn main() {
             }
         },
         BackendKind::Block => {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(windows, unix))]
             {
                 let sink = match BlockDeviceSink::open(&args.dst, args.chunk_size) {
                     Ok(sink) => sink,
@@ -162,9 +173,9 @@ fn main() {
                 };
                 Box::new(sink) as Box<dyn BlockSink>
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(windows, unix)))]
             {
-                eprintln!("Block sink backend is only supported on Windows.");
+                eprintln!("Block sink backend is not supported on this platform.");
                 std::process::exit(1);
             }
         }
@@ -381,6 +392,8 @@ fn parse_backend_kind(raw: &str) -> Result<BackendKind, String> {
 
 fn infer_backend_kind_from_path(path: &str) -> BackendKind {
     if path.starts_with(r"\\.\") {
+        BackendKind::Block
+    } else if cfg!(unix) && path.starts_with("/dev/") {
         BackendKind::Block
     } else if path.to_ascii_lowercase().starts_with("tcp://") {
         BackendKind::Network

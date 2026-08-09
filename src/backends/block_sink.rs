@@ -103,3 +103,54 @@ fn query_device_length(file: &std::fs::File) -> io::Result<u64> {
 
     Ok(out.length as u64)
 }
+
+#[cfg(unix)]
+mod unix {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::io::AsRawFd;
+
+    use crate::backends::block_source::blkgetsize64::device_size;
+    use crate::core::io::{BackendCapabilities, BlockSink};
+
+    pub struct BlockDeviceSink {
+        file: std::fs::File,
+        block_size: usize,
+    }
+
+    impl BlockDeviceSink {
+        pub fn open(device_path: &str, block_size: usize) -> std::io::Result<Self> {
+            let file = OpenOptions::new().read(true).write(true).open(device_path)?;
+            Ok(Self { file, block_size })
+        }
+    }
+
+    impl BlockSink for BlockDeviceSink {
+        fn len(&self) -> std::io::Result<u64> {
+            device_size(self.file.as_raw_fd())
+        }
+
+        fn block_size(&self) -> usize {
+            self.block_size
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                random_access: true,
+                requires_elevation: true,
+            }
+        }
+
+        fn write_at(&mut self, offset: u64, buf: &[u8]) -> std::io::Result<usize> {
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix::BlockDeviceSink;

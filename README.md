@@ -10,7 +10,7 @@ A fast, block-level copier for raw data. It moves bytes between **files**, **raw
 - Uniform `BlockSource` / `BlockSink` abstraction over multiple backends.
 - Backends:
   - `file` – regular files (read/write, any OS).
-  - `block` – raw physical/logical drives via `\\.\` paths (Windows, requires elevation).
+  - `block` – raw physical/logical drives: Windows `\\.\` paths (requires elevation) or Linux `/dev/...` nodes (requires root).
   - `vhdx` – creates and writes an expandable VHDX image via `diskpart` (Windows destination only, requires elevation).
   - `network` – sequential copy over `tcp://host:port` (source or sink).
 - Automatic backend inference from the path.
@@ -19,14 +19,14 @@ A fast, block-level copier for raw data. It moves bytes between **files**, **raw
 
 ## Platform support
 
-| Backend | Windows | Other OS |
-| --- | --- | --- |
-| `file` | ✅ | ✅ |
-| `network` | ✅ | ✅ |
-| `block` | ✅ (elevated) | ❌ |
-| `vhdx` | ✅ (elevated) | ❌ |
+| Backend | Windows | Linux | Other OS |
+| --- | --- | --- | --- |
+| `file` | ✅ | ✅ | ✅ |
+| `network` | ✅ | ✅ | ✅ |
+| `block` | ✅ (elevated) | ✅ (root) | ❌ |
+| `vhdx` | ✅ (elevated) | ❌ | ❌ |
 
-Raw device, VHDX, and the elevation worker are Windows-only.
+Raw block-device access works on Windows (auto-elevates via a UAC worker) and Linux (must be run as root, e.g. with `sudo`). VHDX and the Windows elevation worker are Windows-only.
 
 ## Requirements
 
@@ -56,6 +56,7 @@ If `--src-kind` / `--dst-kind` are omitted, the kind is inferred from the path:
 | Path pattern | Inferred kind |
 | --- | --- |
 | starts with `\\.\` | `block` |
+| starts with `/dev/` (Linux) | `block` |
 | starts with `tcp://` | `network` |
 | ends with `.vhdx` | `vhdx` |
 | anything else | `file` |
@@ -84,6 +85,12 @@ Clone a raw drive to a file (Windows, will prompt for elevation):
 
 ```bash
 bd --src \\.\PhysicalDrive1 --dst backup.img
+```
+
+Clone a raw drive to a file (Linux, run as root):
+
+```bash
+sudo bd --src /dev/sdb --dst backup.img
 ```
 
 Write an image into a new VHDX (Windows, will prompt for elevation):

@@ -7,6 +7,7 @@ name = "block-duplicator"
 version = "0.1.0"
 dependencies = [
  "is_elevated",
+ "libc",
  "windows-sys",
 ]
 
@@ -18,6 +19,12 @@ checksum = "5299060ff5db63e788015dcb9525ad9b84f4fd9717ed2cbdeba5018cbf42f9b5"
 dependencies = [
  "winapi",
 ]
+
+[[package]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "winapi"
