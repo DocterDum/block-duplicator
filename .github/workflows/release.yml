@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without leading v), e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          BIN_DIR="target/${{ matrix.target }}/release"
+          STAGE="block-duplicator-${VERSION}"
+          mkdir "$STAGE"
+
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            cp "$BIN_DIR/bd.exe" "$STAGE/"
+          else
+            cp "$BIN_DIR/bd" "$STAGE/"
+          fi
+          cp README.md LICENSE "$STAGE/"
+
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            7z a "block-duplicator-${VERSION}.zip" "$STAGE" >/dev/null
+          else
+            tar czf "block-duplicator-${VERSION}.tar.gz" "$STAGE"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-duplicator-${{ matrix.target }}
+          path: block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
+
+      - name: Publish to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
