@@ -24,9 +24,11 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: zip
+            bin_name: bd.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
+            bin_name: bd
 
     steps:
       - name: Checkout
@@ -55,11 +57,8 @@ jobs:
           STAGE="block-duplicator-${VERSION}"
           mkdir "$STAGE"
 
-          if [ "${{ matrix.ext }}" = "zip" ]; then
-            cp "$BIN_DIR/bd.exe" "$STAGE/"
-          else
-            cp "$BIN_DIR/bd" "$STAGE/"
-          fi
+          cp "$BIN_DIR/${{ matrix.bin_name }}" "$STAGE/"
+          cp "$BIN_DIR/${{ matrix.bin_name }}" "${{ matrix.bin_name }}"
           cp README.md LICENSE "$STAGE/"
 
           if [ "${{ matrix.ext }}" = "zip" ]; then
@@ -72,10 +71,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: block-duplicator-${{ matrix.target }}
-          path: block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
+          path: |
+            block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
+            ${{ matrix.bin_name }}
 
       - name: Publish to GitHub Release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          files: block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
+          files: |
+            block-duplicator-${{ env.VERSION }}.${{ matrix.ext }}
+            ${{ matrix.bin_name }}
